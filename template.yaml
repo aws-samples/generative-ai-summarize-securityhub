@@ -1,0 +1,144 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Update Security Hub finding with Generative AI summary.
+
+Parameters:
+  pCustomActionARN:
+    Type: String
+    Default: 'arn:aws:securityhub:us-west-2:012345678910:action/custom/summarize'
+    Description: The ARN of the custom action created in Security Hub.
+
+Resources:
+  fnCreateSummary:
+    Type: AWS::Lambda::Function
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W89
+            reason: Not deployed in VPC. Function calls public API endpoints.
+          - id: W92
+            reason: Reserved concurrency not needed for this function.
+    Properties:
+      Code:
+        ZipFile: |
+          import boto3
+          import logging
+
+          logger = logging.getLogger()
+          logger.setLevel("INFO")
+
+          def get_summary(prompt):
+              system_prompt = "You are an expert in AWS Cloud security. Your role is to explain security findings in easy to understand language.\
+              The people you explain findings to do not understand cloud or security in depth. You want to provide helpful information without going \
+              into too much detail. You want to demonstrate that there is area for improvement so they can go into Security Hub and get all the details. \
+              Do not provide specific information like ARNs or resource IDs. Provide the summary in about 50 words."
+
+              modelId = "anthropic.claude-3-sonnet-20240229-v1:0"
+
+              bedrock_client = boto3.client(service_name='bedrock-runtime')
+              inference_config = {"temperature": 0}
+
+              # Create the converse method parameters
+              converse_api_params = {
+                  "modelId": modelId, 
+                  "messages": [{"role": "user", "content": [{"text": prompt}]}],
+                  "inferenceConfig": inference_config,
+                  "system": [{"text": system_prompt}],
+              }
+              
+              response = bedrock_client.converse(**converse_api_params)
+
+              return response['output']['message']['content'][0]['text']
+
+          def update_security_hub(id, product_arn, summary):
+              # Update security hub using batch_update_findings
+              securityhub = boto3.client('securityhub')
+              response = securityhub.batch_update_findings(
+                  FindingIdentifiers=[
+                      {
+                          'Id': id,
+                          'ProductArn': product_arn
+                      }
+                  ],
+                  Note={
+                      'Text': summary,
+                      'UpdatedBy': 'SecurityHub Bot'
+                  }
+              )
+              return response
+              
+          def lambda_handler(event, context):
+              logger.info('## EVENT')
+              logger.info(event)
+
+              prompt = f"""<finding>{event}</finding> Review the finding and summarize the Security Hub finding."""
+
+              generative_ai_response = get_summary(prompt)
+
+              logger.info('## Summary')
+              logger.info(generative_ai_response)
+
+              logger.info('## Finding info')
+              logger.info(f"id: {event['detail']['findings'][0]['Id']}")
+              logger.info(f"product_arn: {event['detail']['findings'][0]['ProductArn']}")
+
+              logger.info('## Update Security Hub finding')
+              response = update_security_hub(event['detail']['findings'][0]['Id'], event['detail']['findings'][0]['ProductArn'], generative_ai_response[:512])
+              logger.info(response)
+
+      Handler: index.lambda_handler
+      Role: !GetAtt IAMRolefnCreateSummary.Arn
+      Runtime: python3.11
+      Timeout: 300
+
+  IAMRolefnCreateSummary:
+    Type: AWS::IAM::Role
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W11
+            reason: Star resource needed for BatchUpdateFindings.
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/AmazonBedrockFullAccess
+      Policies:
+        - PolicyName: UpdateSecurityHub
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'securityhub:BatchUpdateFindings'
+                Resource: '*'
+
+  EventBridgeRule:
+    Type: AWS::Events::Rule
+    Properties:
+      EventPattern:
+        source:
+          - "aws.securityhub"
+        detail-type:
+          - "Security Hub Findings - Custom Action"
+        resources:
+          - !Ref pCustomActionARN
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt fnCreateSummary.Arn
+          Id: fnCreateSummary
+
+  EventBridgePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref fnCreateSummary
+      Action: 'lambda:InvokeFunction'
+      Principal: 'events.amazonaws.com'
+      SourceArn: !GetAtt EventBridgeRule.Arn

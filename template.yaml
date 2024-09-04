@@ -13,6 +13,8 @@ Resources:
     Metadata:
       cfn_nag:
         rules_to_suppress:
+          - id: W58
+            reason: Permission to write to Cloudwatch Logs is provided by AWSLambdaBasicExecutionRole 
           - id: W89
             reason: Not deployed in VPC. Function calls public API endpoints.
           - id: W92
@@ -30,9 +32,11 @@ Resources:
               system_prompt = "You are an expert in AWS Cloud security. Your role is to explain security findings in easy to understand language.\
               The people you explain findings to do not understand cloud or security in depth. You want to provide helpful information without going \
               into too much detail. You want to demonstrate that there is area for improvement so they can go into Security Hub and get all the details. \
-              Do not provide specific information like ARNs or resource IDs. Provide the summary in about 50 words."
+              Do not provide specific information like ARNs or resource IDs. \
+              \
+              You will receive a finding in the prompt. Understand the finding and provide a summary in less than 50 words."
 
-              modelId = "anthropic.claude-3-sonnet-20240229-v1:0"
+              modelId = "anthropic.claude-3-5-sonnet-20240620-v1:0"
 
               bedrock_client = boto3.client(service_name='bedrock-runtime')
               inference_config = {"temperature": 0}
@@ -106,10 +110,12 @@ Resources:
               Service:
                 - lambda.amazonaws.com
             Action:
-              - 'sts:AssumeRole'
+              - sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Sub ${AWS::AccountId}
       ManagedPolicyArns:
-        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
-        - arn:aws:iam::aws:policy/AmazonBedrockFullAccess
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
       Policies:
         - PolicyName: UpdateSecurityHub
           PolicyDocument:
@@ -117,8 +123,17 @@ Resources:
             Statement:
               - Effect: Allow
                 Action:
-                  - 'securityhub:BatchUpdateFindings'
+                  - securityhub:BatchUpdateFindings
                 Resource: '*'
+        - PolicyName: InvokeBedrock
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'bedrock:InvokeModel'
+                Resource:
+                  - !Sub arn:${AWS::Partition}:bedrock:${AWS::Region}::foundation-model/anthropic.claude-3-5-sonnet-20240620-v1:0
 
   EventBridgeRule:
     Type: AWS::Events::Rule

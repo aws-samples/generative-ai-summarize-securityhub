@@ -1,3 +1,4 @@
 *.json
 *old*
 *.py
+*.txt

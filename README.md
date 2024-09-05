@@ -16,10 +16,10 @@ This solution creates a custom action that sends specific Security Hub findings 
 ### Steps
 
 1. Create a custom action named **Summarize (Explain)**
-2. Deploy the CloudFormation template contained in this repository. For pCustomActionARN parameter, enter the ARN from step 1.
-3. Select a finding you to summarize, and choose Actions, Summarize (Explain).
+2. Deploy the CloudFormation template contained in this repository. For **pCustomActionARN** parameter, enter the ARN from step 1.
+3. Select a finding you to summarize, and choose **Actions**, **Summarize (Explain)**.
    ![Summarize](img/summarize.png)
-4. You view the result on the history tab.
+4. You view the result on the **history** tab.
    ![Results](img/results.png)
 
 ## Updating the prompt

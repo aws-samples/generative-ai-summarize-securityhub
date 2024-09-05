@@ -1,10 +1,12 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
 AWSTemplateFormatVersion: '2010-09-09'
 Description: Update Security Hub finding with Generative AI summary.
 
 Parameters:
   pCustomActionARN:
     Type: String
-    Default: 'arn:aws:securityhub:us-west-2:012345678910:action/custom/summarize'
+    Default: arn:aws:securityhub:us-west-2:012345678910:action/custom/summarize
     Description: The ARN of the custom action created in Security Hub.
 
 Resources:
@@ -14,7 +16,8 @@ Resources:
       cfn_nag:
         rules_to_suppress:
           - id: W58
-            reason: Permission to write to Cloudwatch Logs is provided by AWSLambdaBasicExecutionRole 
+            reason: Permission to write to Cloudwatch Logs is provided by
+              AWSLambdaBasicExecutionRole
           - id: W89
             reason: Not deployed in VPC. Function calls public API endpoints.
           - id: W92
@@ -24,10 +27,8 @@ Resources:
         ZipFile: |
           import boto3
           import logging
-
           logger = logging.getLogger()
           logger.setLevel("INFO")
-
           def get_summary(prompt):
               system_prompt = "You are an expert in AWS Cloud security. Your role is to explain security findings in easy to understand language.\
               The people you explain findings to do not understand cloud or security in depth. You want to provide helpful information without going \
@@ -35,24 +36,18 @@ Resources:
               Do not provide specific information like ARNs or resource IDs. \
               \
               You will receive a finding in the prompt. Understand the finding and provide a summary in less than 50 words."
-
               modelId = "anthropic.claude-3-5-sonnet-20240620-v1:0"
-
               bedrock_client = boto3.client(service_name='bedrock-runtime')
               inference_config = {"temperature": 0}
-
               # Create the converse method parameters
               converse_api_params = {
-                  "modelId": modelId, 
+                  "modelId": modelId,
                   "messages": [{"role": "user", "content": [{"text": prompt}]}],
                   "inferenceConfig": inference_config,
                   "system": [{"text": system_prompt}],
               }
-              
               response = bedrock_client.converse(**converse_api_params)
-
               return response['output']['message']['content'][0]['text']
-
           def update_security_hub(id, product_arn, summary):
               # Update security hub using batch_update_findings
               securityhub = boto3.client('securityhub')
@@ -69,22 +64,16 @@ Resources:
                   }
               )
               return response
-              
           def lambda_handler(event, context):
               logger.info('## EVENT')
               logger.info(event)
-
               prompt = f"""<finding>{event}</finding> Review the finding and summarize the Security Hub finding."""
-
               generative_ai_response = get_summary(prompt)
-
               logger.info('## Summary')
               logger.info(generative_ai_response)
-
               logger.info('## Finding info')
               logger.info(f"id: {event['detail']['findings'][0]['Id']}")
               logger.info(f"product_arn: {event['detail']['findings'][0]['ProductArn']}")
-
               logger.info('## Update Security Hub finding')
               response = update_security_hub(event['detail']['findings'][0]['Id'], event['detail']['findings'][0]['ProductArn'], generative_ai_response[:512])
               logger.info(response)
@@ -131,7 +120,7 @@ Resources:
             Statement:
               - Effect: Allow
                 Action:
-                  - 'bedrock:InvokeModel'
+                  - bedrock:InvokeModel
                 Resource:
                   - !Sub arn:${AWS::Partition}:bedrock:${AWS::Region}::foundation-model/anthropic.claude-3-5-sonnet-20240620-v1:0
 
@@ -140,9 +129,9 @@ Resources:
     Properties:
       EventPattern:
         source:
-          - "aws.securityhub"
+          - aws.securityhub
         detail-type:
-          - "Security Hub Findings - Custom Action"
+          - Security Hub Findings - Custom Action
         resources:
           - !Ref pCustomActionARN
       State: ENABLED
@@ -154,6 +143,6 @@ Resources:
     Type: AWS::Lambda::Permission
     Properties:
       FunctionName: !Ref fnCreateSummary
-      Action: 'lambda:InvokeFunction'
-      Principal: 'events.amazonaws.com'
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
       SourceArn: !GetAtt EventBridgeRule.Arn

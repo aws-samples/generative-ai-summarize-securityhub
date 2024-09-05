@@ -1,4 +1,4 @@
 *.json
-*old*
 *.py
 *.txt
+.DS_Store

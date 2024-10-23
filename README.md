@@ -18,9 +18,9 @@ This solution creates a custom action that sends specific Security Hub findings 
 1. Create a custom action named **Summarize (Explain)**
 2. Deploy the CloudFormation template contained in this repository. For **pCustomActionARN** parameter, enter the ARN from step 1.
 3. Select a finding you to summarize, and choose **Actions**, **Summarize (Explain)**.
-   ![Summarize](img/summarize.png)
+   ![Summarize](img/sh-summarize.png)
 4. You view the result on the **history** tab.
-   ![Results](img/results.png)
+   ![Results](img/sh-results.png)
 
 ## Updating the prompt
 The system prompt will change how the summarizes are created. To learn prompt engineering, visit the [prompt engineering guidelines](https://docs.aws.amazon.com/bedrock/latest/userguide/prompt-engineering-guidelines.html) in the Amazon Bedrock user guide. The function will include the first 512 characters when updating the finding note.

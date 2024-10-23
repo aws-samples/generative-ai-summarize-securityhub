@@ -1,5 +1,8 @@
 ## Use generative AI to summarize Security Hub findings
 
+>[!TIP]
+> For a step-by-step tutorial, review the post on [AWS Community](https://community.aws/content/2nqQZeWUhyjc3AH03fdnmhczwgM/use-generative-ai-to-summarize-security-hub-findings).
+
 ## Overview of Solution
 
 This solution creates a custom action that sends specific Security Hub findings to EventBridge. An EventBridge rule listens for the event, and invokes an AWS Lambda function. The Lambda function invokes the Amazon Bedrock service to summarize the finding. The finding details are updated in Security Hub with a simplified summary for the user to review. 

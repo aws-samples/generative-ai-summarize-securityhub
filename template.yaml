@@ -4,14 +4,23 @@ AWSTemplateFormatVersion: '2010-09-09'
 Description: Update Security Hub finding with Generative AI summary.
 
 Parameters:
-  pCustomActionARN:
+  pCustomActionSummarizeARN:
     Type: String
     Default: arn:aws:securityhub:us-west-2:012345678910:action/custom/summarize
-    Description: The ARN of the custom action created in Security Hub.
+    Description: The ARN of the custom action for summarize created in Security Hub.
+  pCustomActionInvestigateARN:
+    Type: String
+    Default: arn:aws:securityhub:us-west-2:012345678910:action/custom/investigate
+    Description: The ARN of the custom action for investigate created in Security Hub.
+
+Conditions:
+  enableSummarize: !Not [!Equals [!Ref pCustomActionSummarizeARN, '']]  
+  enableInvestigate: !Not [!Equals [!Ref pCustomActionInvestigateARN, '']]
 
 Resources:
   fnCreateSummary:
     Type: AWS::Lambda::Function
+    Condition: enableSummarize
     Metadata:
       cfn_nag:
         rules_to_suppress:
@@ -25,26 +34,26 @@ Resources:
     Properties:
       Code:
         ZipFile: |
+          # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+          # SPDX-License-Identifier: MIT-0
           import boto3
           import logging
+          import os
+
           logger = logging.getLogger()
-          logger.setLevel("INFO")
-          def get_summary(prompt):
-              system_prompt = "You are an expert in AWS Cloud security. Your role is to explain security findings in easy to understand language.\
-              The people you explain findings to do not understand cloud or security in depth. You want to provide helpful information without going \
-              into too much detail. You want to demonstrate that there is area for improvement so they can go into Security Hub and get all the details. \
-              Do not provide specific information like ARNs or resource IDs. \
-              \
-              You will receive a finding in the prompt. Understand the finding and provide a summary in less than 50 words."
-              modelId = "anthropic.claude-3-5-sonnet-20240620-v1:0"
+          logger.setLevel("INFO")         
+
+          def get_summary(event):
+              # Using Bedrock prompt management with the provided ARN
+              PROMPT_ARN = os.environ.get('PROMPT_ARN')
               bedrock_client = boto3.client(service_name='bedrock-runtime')
-              inference_config = {"temperature": 0}
+
               # Create the converse method parameters
               converse_api_params = {
-                  "modelId": modelId,
-                  "messages": [{"role": "user", "content": [{"text": prompt}]}],
-                  "inferenceConfig": inference_config,
-                  "system": [{"text": system_prompt}],
+                  "modelId": PROMPT_ARN,
+                  "promptVariables": {
+                    "event":{"text": event}
+                  }
               }
               response = bedrock_client.converse(**converse_api_params)
               return response['output']['message']['content'][0]['text']
@@ -67,8 +76,8 @@ Resources:
           def lambda_handler(event, context):
               logger.info('## EVENT')
               logger.info(event)
-              prompt = f"""<finding>{event}</finding> Review the finding and summarize the Security Hub finding."""
-              generative_ai_response = get_summary(prompt)
+              event_str = str(event)
+              generative_ai_response = get_summary(event_str)
               logger.info('## Summary')
               logger.info(generative_ai_response)
               logger.info('## Finding info')
@@ -80,16 +89,455 @@ Resources:
 
       Handler: index.lambda_handler
       Role: !GetAtt IAMRolefnCreateSummary.Arn
-      Runtime: python3.11
+      Runtime: python3.13
       Timeout: 300
+      Environment:
+        Variables:
+          PROMPT_ARN: !Ref promptCreateSummary
+
+  promptCreateSummary:
+    Type: AWS::Bedrock::Prompt
+    Condition: enableSummarize
+    Properties:
+      Name: CreateSummary
+      Variants: 
+        - InferenceConfiguration:
+            Text:
+              MaxTokens: 2000
+              StopSequences:
+                - "\n\nHuman:"
+              Temperature: 0.0
+              TopP: 0.9990000128746033
+          ModelId: us.anthropic.claude-3-5-haiku-20241022-v1:0
+          Name: "variantOne"
+          TemplateConfiguration:
+            Chat:
+              InputVariables:
+                - Name: event
+              Messages:
+                - Content:
+                      - Text: | 
+                          <finding>{{event}}</finding> 
+                          
+                          Review the finding and summarize the Security Hub finding.
+                  Role: user
+              System:
+                  - Text: | 
+                      You are an expert in AWS Cloud security. Your role is to explain
+                      security findings in easy to understand language. The people you
+                      explain findings to do not understand cloud or security in depth.
+                      You want to provide helpful information without going into too
+                      much detail. You want to demonstrate that there is area for
+                      improvement so they can go into Security Hub and get all the
+                      details.
+
+
+                      Do not provide specific information like ARNs or resource IDs.
+
+
+                      You will receive a finding in the prompt. Understand the finding
+                      and provide a summary in less than 50 words. Only include the
+                      summary, don't include any pre-text.
+          TemplateType: CHAT
+  
+  fnCreateInvestigation:
+    Type: AWS::Lambda::Function
+    Condition: enableInvestigate
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W58
+            reason: Permission to write to Cloudwatch Logs is provided by
+              AWSLambdaBasicExecutionRole
+          - id: W89
+            reason: Not deployed in VPC. Function calls public API endpoints.
+          - id: W92
+            reason: Reserved concurrency not needed for this function.
+    Properties:
+      Code:
+        ZipFile: |
+          # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+          # SPDX-License-Identifier: MIT-0
+          import boto3
+          import json
+          import logging
+          import os
+
+          logger = logging.getLogger()
+          logger.setLevel("INFO")
+
+          # Using Bedrock prompt management with the provided ARN
+          modelId = os.environ.get('PROMPT_ARN')
+          bedrock_client = boto3.client(service_name='bedrock-runtime')
+
+          def execute_boto3_command(service, operation, region=None, params=None):
+              """Execute a boto3 command and return the output."""
+              
+              # Only allow read-only operations
+              read_only_prefixes = ["describe", "get", "list"]
+              if not any(operation.startswith(prefix) for prefix in read_only_prefixes):
+                  return {
+                      "stdout": "",
+                      "stderr": "Only read-only operations (describe, get, list) are allowed.",
+                      "exit_code": 126  # Permission denied exit code
+                  }
+              
+              try:
+                  # Create boto3 client with region if specified
+                  if region:
+                      client = boto3.client(service, region_name=region)
+                  else:
+                      client = boto3.client(service)
+                  
+                  # Call the boto3 method
+                  if params is None:
+                      params = {}
+                      
+                  method = getattr(client, operation)
+                  result = method(**params)
+                  
+                  # Convert result to string
+                  result_str = json.dumps(result, default=str, indent=2)
+                  
+                  return {
+                      "stdout": result_str,
+                      "stderr": "",
+                      "exit_code": 0
+                  }
+              except Exception as e:
+                  return {
+                      "error": str(e),
+                      "stdout": "",
+                      "stderr": str(e),
+                      "exit_code": 1
+                  }
+
+          def write_file(filename, content):
+              """Write content to a file in the /tmp directory."""
+              if not filename.startswith('/tmp/'):
+                  return {
+                      "error": "Can only write to /tmp directory",
+                      "success": False
+                  }
+              try:
+                  with open(filename, 'w') as f:
+                      f.write(content)
+                  return {
+                      "success": True,
+                      "message": f"Content written to {filename}"
+                  }
+              except Exception as e:
+                  return {
+                      "error": str(e),
+                      "success": False
+                  }
+
+          def converse_with_claude(messages, event):
+              # Create the converse method parameters
+              converse_api_params = {
+                  "modelId": modelId,
+                  "messages": messages,
+                  "promptVariables": {
+                      "event":{"text": event}
+                  }
+              }
+
+              response = bedrock_client.converse(**converse_api_params)
+              assistant_response = response['output']['message']['content']
+
+              text_items = [item for item in assistant_response if 'text' in item]
+              if text_items:
+                  print(f"Assistant: {text_items[0]['text']}")
+              
+              tool_calls = [item for item in assistant_response if 'toolUse' in item]
+              if not tool_calls:
+                  return response
+              
+              # There are tool calls, process them
+              tool_call = {"role": "assistant", "content": assistant_response}
+              messages.append(tool_call)
+              
+              tool_results = []
+              for item in assistant_response:
+                  if 'toolUse' in item:
+                      tool = item['toolUse']
+                      tool_name = item['toolUse']['name']
+                      
+                      match tool_name:
+                          case "execute_boto3":
+                              service = tool['input']['service']
+                              operation = tool['input']['operation']
+                              region = tool['input'].get('region')
+                              params = tool['input'].get('params', {})
+                              
+                              print(f"BOTO3: {service}.{operation}({params}) in region {region}")
+                              result = execute_boto3_command(service, operation, region, params)
+                              print(f"RESULT: {result}\n")
+                          case "write_file":
+                              filename = tool['input']['filename']
+                              content = tool['input']['content']
+
+                              print(f"WRITE_FILE: Writing to {filename}")
+                              result = write_file(filename, content)
+                              print(f"RESULT: {result}\n")
+                          case _:
+                              result = "Unknown tool"
+                      
+                      # Ensure we never send an empty text field
+                      result_text = json.dumps(result)
+                      if not result_text.strip():
+                          result_text = "{}"  # Use empty object instead of empty string
+                          
+                      tool_results.append({
+                          "toolResult": {
+                              "toolUseId": tool['toolUseId'],
+                              "content": [
+                                  {
+                                      "text": result_text
+                                  }
+                              ]
+                          }
+                      })
+              
+              # Add all tool results to a single message
+              if tool_results:
+                  tool_result_message = {
+                      "role": "user",
+                      "content": tool_results
+                  }
+                  
+                  messages.append(tool_result_message)
+                  
+                  # Recursively call this function with the updated messages
+                  return converse_with_claude(messages, event)
+
+          def update_security_hub(id, product_arn, summary):
+              # Update security hub using batch_update_findings
+              securityhub = boto3.client('securityhub')
+              response = securityhub.batch_update_findings(
+                  FindingIdentifiers=[
+                      {
+                          'Id': id,
+                          'ProductArn': product_arn
+                      }
+                  ],
+                  Note={
+                      'Text': summary,
+                      'UpdatedBy': 'SecurityHub Bot'
+                  }
+              )
+              return response
+              
+          def upload_to_s3(file_path, object_key):
+              """
+              Upload a file to the S3 bucket specified in the ANALYSIS_BUCKET environment variable
+
+              Args:
+                  file_path (str): Local path to the file to upload
+                  object_key (str): S3 object key (path within the bucket)
+
+              Returns:
+                  dict: Response from S3 put_object operation or error message
+              """
+              try:
+                  bucket_name = os.environ.get('ANALYSIS_BUCKET')
+                  if not bucket_name:
+                      return {"error": "ANALYSIS_BUCKET environment variable not set"}
+
+                  s3_client = boto3.client('s3')
+                  region = s3_client.meta.region_name
+
+                  with open(file_path, 'rb') as file:
+                      response = s3_client.put_object(
+                          Bucket=bucket_name,
+                          Key=object_key,
+                          Body=file.read(),
+                          ContentType='text/html'
+                      )
+
+                  # Generate the S3 console URL
+                  import urllib.parse
+                  encoded_key = urllib.parse.quote(object_key)
+                  console_url = f"https://s3.console.aws.amazon.com/s3/object/{bucket_name}?region={region}&prefix={encoded_key}"
+
+                  return {
+                      "success": True,
+                      "s3_uri": f"s3://{bucket_name}/{object_key}",
+                      "console_url": console_url,
+                      "response": response
+                  }
+              except Exception as e:
+                  logger.error(f"Error uploading to S3: {str(e)}")
+                  return {"error": str(e)}
+              
+          def lambda_handler(event, context):
+              
+              logger.info('## EVENT')
+              logger.info(event)
+
+              messages = []
+
+              response = converse_with_claude(messages, str(event))
+
+              logger.info('## Response')
+              logger.info(response)
+
+              logger.info('## Upload analysis to S3')
+              finding_id = event['detail']['findings'][0]['Id']
+              logger.info(f'id: {finding_id}')
+              s3_result = upload_to_s3('/tmp/security_report.html', f'{finding_id}.html')
+
+              logger.info('## Get S3 URL')
+              logger.info(s3_result)
+              
+              logger.info('## Update Security Hub finding with S3 URL')
+              # Update Security Hub finding with S3 console URL
+              if 'console_url' in s3_result:
+                  console_url = s3_result['console_url']
+                  summary = f"Finding investigation available in S3: {console_url}"
+                  response = update_security_hub(
+                      event['detail']['findings'][0]['Id'],
+                      event['detail']['findings'][0]['ProductArn'],
+                      summary
+                  )
+
+              logger.info('## Security Hub update response')
+              logger.info(response)
+
+      Handler: index.lambda_handler
+      Role: !GetAtt IAMRolefnCreateInvestigation.Arn
+      Runtime: python3.13
+      Timeout: 300
+      Environment:
+        Variables: 
+          ANALYSIS_BUCKET: !Ref s3bucketInvestigate
+          PROMPT_ARN: !Ref promptCreateInvestigation
+
+  promptCreateInvestigation:
+    Type: AWS::Bedrock::Prompt
+    Condition: enableInvestigate
+    Properties:
+      Name: CreateInvestigation
+      Variants: 
+        - InferenceConfiguration:
+            Text:
+              MaxTokens: 2000
+              StopSequences:
+                - "\n\nHuman:"
+              Temperature: 0.0
+              TopP: 0.9990000128746033
+          ModelId: us.anthropic.claude-3-5-haiku-20241022-v1:0
+          Name: "variantOne"
+          TemplateConfiguration:
+            Chat:
+              InputVariables:
+                - Name: event
+              Messages:
+                - Content:
+                      - Text: | 
+                          <finding>
+                          {{event}}
+                          </finding>
+
+                          Review the finding from AWS Security Hub. Create a structured investigation plan to analyze this finding.
+
+                          ## Investigation Requirements:
+                          1. Use the execute_boto3 tool to run read-only AWS operations (describe, get, list) that are relevant to the finding
+                          2. Apply appropriate filters to minimize output and focus only on relevant resources
+                          3. Document each operation you run and its complete raw output
+                          4. Analyze what each result means in the context of the finding
+                          5. Focus only on this specific finding - do not check for other similar findings
+                          6. If something is not being used, consider deleting the resource rather than remediating it.
+                          7. Run at least (3) boto3 commands when possible.
+
+                          ## Report Structure:
+                          Generate a well-structured HTML report with the following sections:
+                          1. **Executive Summary**
+                          - Brief description of the finding
+                          - Severity and impact assessment
+                          - Security Hub finding ID / AWS account ID / Region
+                          2. **Investigation Process**
+                          - For each investigative step:
+                          - Step number and description
+                          - AWS operation executed (in a code block)
+                          - Complete raw operation output (in a formatted pre block)
+                          - Analysis of the results
+                          3. **Findings and Analysis**
+                          - Detailed explanation of what was discovered
+                          - Any names of the resource
+                          - When it was created
+                          - Security implications
+                          - Root cause analysis (if possible)
+                          4. **Recommendations**
+                          - Specific cli actions to remediate the issue
+
+                          ## HTML Requirements:
+                          - Include a prominent disclaimer at the top stating this report was generated using AI and may contain errors
+                          - Use proper HTML formatting with CSS for readability
+                          - Format command outputs in monospace font within pre tags
+                          - Use consistent styling throughout the document
+                          Save the HTML file in the /tmp directory as security_report.html.
+                  Role: user
+              ToolConfiguration:
+                Tools:
+                  - ToolSpec:
+                      Name: execute_boto3
+                      Description: Execute AWS operations using boto3
+                      InputSchema:
+                        Json:
+                          {
+                            "type": "object",
+                            "properties": {
+                              "region": {
+                                "type": "string",
+                                "description": "AWS region to use (e.g., us-east-1, us-west-2)"
+                              },
+                              "params": {
+                                "type": "object",
+                                "description": "Parameters for the boto3 operation"
+                              },
+                              "operation": {
+                                "type": "string",
+                                "description": "The boto3 operation to execute (e.g., describe_instances, list_buckets)"
+                              },
+                              "service": {
+                                "type": "string",
+                                "description": "The AWS service name (e.g., ec2, s3, iam)"
+                              }
+                            },
+                            "required": ["service", "operation"]
+                          }
+                  - ToolSpec:
+                      Name: write_file
+                      Description: Write content to a file in the /tmp directory
+                      InputSchema:
+                        Json:
+                          {
+                            "type": "object",
+                            "properties": {
+                              "content": {
+                                "type": "string",
+                                "description": "Content to write to the file"
+                              },
+                              "filename": {
+                                "type": "string",
+                                "description": "Name of the file to write (must be in /tmp directory)"
+                              }
+                            },
+                            "required": ["filename", "content"]
+                          }
+          TemplateType: CHAT
 
   IAMRolefnCreateSummary:
     Type: AWS::IAM::Role
+    Condition: enableSummarize
     Metadata:
       cfn_nag:
         rules_to_suppress:
           - id: W11
             reason: Star resource needed for BatchUpdateFindings.
+          - id: F3
+            reason: Bedrock permissions for calling invoke:Model on prompt resource
     Properties:
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
@@ -122,10 +570,115 @@ Resources:
                 Action:
                   - bedrock:InvokeModel
                 Resource:
-                  - !Sub arn:${AWS::Partition}:bedrock:${AWS::Region}::foundation-model/anthropic.claude-3-5-sonnet-20240620-v1:0
+                  - !Sub arn:${AWS::Partition}:bedrock:*:${AWS::AccountId}:inference-profile/us.anthropic.claude-3-5-haiku-20241022-v1:0
+                  - !Sub arn:${AWS::Partition}:bedrock:*::foundation-model/anthropic.claude-3-5-haiku-20241022-v1:0
+              - Effect: Allow
+                Action:
+                  - bedrock:*
+                Resource:
+                  - "*"
 
-  EventBridgeRule:
+  IAMRolefnCreateInvestigation:
+    Type: AWS::IAM::Role
+    Condition: enableInvestigate
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W11
+            reason: Star resource needed for BatchUpdateFindings.
+          - id: F3
+            reason: Bedrock permissions for calling invoke:Model on prompt resource
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Sub ${AWS::AccountId}
+      ManagedPolicyArns:
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/ReadOnlyAccess
+      Policies:
+        - PolicyName: UpdateSecurityHub
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - securityhub:BatchUpdateFindings
+                Resource: '*'
+        - PolicyName: InvokeBedrock
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                Resource:
+                  - !Sub arn:${AWS::Partition}:bedrock:*:${AWS::AccountId}:inference-profile/us.anthropic.claude-3-5-haiku-20241022-v1:0
+                  - !Sub arn:${AWS::Partition}:bedrock:*::foundation-model/anthropic.claude-3-5-haiku-20241022-v1:0
+              - Effect: Allow
+                Action:
+                  - bedrock:*
+                Resource:
+                  - "*"
+        - PolicyName: UploadToS3
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                Resource: !Sub ${s3bucketInvestigate.Arn}/*
+
+  s3bucketInvestigate:
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W35
+            reason: No bucket logging needed.
+    Type: AWS::S3::Bucket
+    Condition: enableInvestigate
+    Properties:
+      BucketName: !Sub securityhub-investigate-${AWS::AccountId}
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+  
+  s3bucketInvestigatePolicy:
+    Type: AWS::S3::BucketPolicy
+    Condition: enableInvestigate
+    Properties:
+      Bucket: !Ref s3bucketInvestigate
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowSSLRequestsOnly
+            Principal: '*'
+            Action: 's3:*'
+            Effect: Deny
+            Resource:
+              - !Sub '${s3bucketInvestigate.Arn}'
+              - !Sub '${s3bucketInvestigate.Arn}/*'
+            Condition:
+              Bool:
+                aws:SecureTransport: false
+
+  EventBridgeRuleSummarize:
     Type: AWS::Events::Rule
+    Condition: enableSummarize
     Properties:
       EventPattern:
         source:
@@ -133,16 +686,42 @@ Resources:
         detail-type:
           - Security Hub Findings - Custom Action
         resources:
-          - !Ref pCustomActionARN
+          - !Ref pCustomActionSummarizeARN
       State: ENABLED
       Targets:
         - Arn: !GetAtt fnCreateSummary.Arn
           Id: fnCreateSummary
 
-  EventBridgePermission:
+  EventBridgePermissionSummarize:
     Type: AWS::Lambda::Permission
+    Condition: enableSummarize
     Properties:
       FunctionName: !Ref fnCreateSummary
       Action: lambda:InvokeFunction
       Principal: events.amazonaws.com
-      SourceArn: !GetAtt EventBridgeRule.Arn
+      SourceArn: !GetAtt EventBridgeRuleSummarize.Arn
+
+  EventBridgeRuleInvestigate:
+    Type: AWS::Events::Rule
+    Condition: enableInvestigate
+    Properties:
+      EventPattern:
+        source:
+          - aws.securityhub
+        detail-type:
+          - Security Hub Findings - Custom Action
+        resources:
+          - !Ref pCustomActionInvestigateARN
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt fnCreateInvestigation.Arn
+          Id: fnCreateSummary
+
+  EventBridgePermissionInvestigate:
+    Type: AWS::Lambda::Permission
+    Condition: enableInvestigate
+    Properties:
+      FunctionName: !Ref fnCreateInvestigation
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt EventBridgeRuleInvestigate.Arn
